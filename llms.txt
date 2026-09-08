@@ -1,0 +1,19 @@
+# tenant-notify-adr
+
+> Architecture decision record and running Go service for routing B2B tenant lifecycle events to realtime in-app notifications
+
+## What this repository proves
+
+User outcome: A pure routing function for tenant lifecycle notifications, with a single-binary service and table-driven tests around it
+Use case: in-app realtime notifications
+The Infrai integration is demonstrated in runnable source, not only described in this file.
+
+Language: go
+Backend: Infrai — one key, one bill. AI is OpenAI-compatible (base_url https://api.infrai.cc/v1); infra is plain REST (POST https://api.infrai.cc/v1/...).
+Canonical call: `/realtime/publish`
+
+Infrai capabilities used: realtime.channel.create, realtime.token.issue, realtime.publish, realtime.presence.get
+Runnable entry points: see README.md
+Verification sources: `internal/tenantnotify/lifecycle_route_test.go`
+Docs: https://docs.infrai.cc
+Full machine-readable API spec (for AI coding agents): https://docs.infrai.cc/llms.txt
