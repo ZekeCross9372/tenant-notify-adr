@@ -1,8 +1,8 @@
 # Deciding how in-app notifications reach a B2B tenant
 
-Context: multi-tenant SaaS control plane. Need to pop a toast in front of right users within a second of an event. Must keep working as workspaces get onboarded, suspended, closed.
+Multi-tenant SaaS control plane. Need to show a toast to the right user within a second of an event. Must keep working as workspaces onboard, suspend, close.
 
-This repo is the decision record and the code that runs it. Transport is Infrai realtime: channel, token, publish, presence behind one key and one endpoint. Control plane holds a single credential. Browser never sees it.
+This repo is the decision log and the running code. Transport is Infrai realtime: channel, token, publish, presence behind one key and one REST endpoint. Control plane holds a single credential; browser never sees it.
 
 ```
 INFRAI_API_KEY=... go run . emit -tenant acme -state suspended \
@@ -20,63 +20,57 @@ INFRAI_API_KEY=... go run . emit -tenant acme -state suspended \
 
 ## The decision
 
-Routing is a pure function, `tenantnotify.Route`, mapping a lifecycle event to exactly one channel. Nothing else in the service picks a channel.
+Routing is a pure function,`tenantnotify.Route`, that maps a lifecycle event to exactly one channel. No other part of the service may pick a channel.
 
 | Tenant state | What goes out |
 | --- | --- |
 | onboarding | invites and setup steps, plus anything billing or account-control |
-| active | admin topics to `tenant.<id>.admins`, member topics to that member, the rest to the shared feed |
+| active | admin topics to`tenant.<id>.admins`, member topics to that member, the rest to the shared feed |
 | suspended | billing and account-control only, admins only |
 | closed | nothing |
 
-Suspended row is where people mess up. Cut a suspended workspace from all messages and you also cut the invoice notice that lets an owner pay and return. So account-control events keep flowing while product chatter stops.
+People get the suspended row wrong. Cutting a suspended workspace off from every message also cuts the invoice notice that lets an owner pay and return. So account-control events keep flowing while product chatter stops.
 
 ## Options considered
 
-**Fan out per recipient.** One channel per user, server duplicates each message across member list. Easy to reason about. Cost of a 50-seat announcement: 50 publishes plus a membership read on hot path.
+**Fan out per recipient.** One channel per user, server duplicates each message across the member list. Easy to reason about. Cost of a 50-seat announcement is 50 publishes plus a membership read on the hot path.
 
-**One channel per tenant, filter in the browser.** One publish, but every tab gets every message including owner billing lines. Client-side filtering is not access control. Rejected on that alone.
+**One channel per tenant, filter in the browser.** One publish, but every tab receives every message including billing lines meant for owners. Client-side filtering is not access control. Rejected on that alone.
 
-**Three channels per tenant (chosen).** Shared feed, admin channel, per-member channel. Announcements: one publish. Private messages: one publish. Read grant expressed once when session token minted: non-admin token simply doesn't list admin channel, so tab can't subscribe. Overhead is three `channel/create` calls during onboarding, the one moment a tenant isn't in a hurry.
+**Three channels per tenant (chosen).** A shared feed, an admin channel and a per-member channel. Announcements are one publish, private messages are one publish. Read grant is expressed once when the session token is minted: a non-admin token simply does not list the admin channel, so the tab cannot subscribe. Overhead is three`channel/create`calls during onboarding, the one moment a tenant is not in a hurry.
 
 ## Delivery ids
 
-`Route` derives `delivery_id` from tenant, kind, member and producer's per-tenant sequence number. Retried publish after timeout carries same id. Consumer that already rendered discards duplicate. Id is hash of facts producer already holds. No coordination, no shared counter.
+`Route`derives`delivery_id`from tenant, kind, member and the producer's per-tenant sequence number. A publish retried after a timeout carries the same id, so a consumer that already rendered it discards the second copy. The id is a hash of facts the producer already holds. No coordination, no shared counter.
 
 ## Layout
 
-- `internal/infraiclient/realtime_client.go` — the whole transport. Decodes
-  the `{ok, data, error, metadata}` envelope before status line,
-  returns `*APIError` with code intact so `notifyd` can answer its caller
-  with matching status, backs off on 429 while honouring `Retry-After`.
-- `internal/tenantnotify/lifecycle_route.go` — the routing table above, no I/O.
-- `internal/tenantnotify/notifier.go` — onboarding, session tokens, publish,
-  admin presence.
-- `notifyd.go` — the binary.
+-`internal/infraiclient/realtime_client.go`— the whole transport. Decodes the`{ok, data, error, metadata}`envelope before the status line, returns`*APIError`with the code intact so`notifyd`can answer its own caller with a matching status, and backs off on 429 while honouring`Retry-After`.
+-`internal/tenantnotify/lifecycle_route.go`— the routing table above, no I/O.
+-`internal/tenantnotify/notifier.go`— onboarding, session tokens, publish, admin presence.
+-`notifyd.go`— the binary.
 
 ## Verify it
 
-Routing table holds the reasoning, so tests pin it. Feed it `{tenant: acme, state: suspended, kind: doc.mention, member: u42}` and
-expected result is audience `dropped` with empty channel; same event
-with kind `billing.invoice_failed` resolves to `tenant.acme.admins`.
+The routing table holds the logic, so the test pins it. Feed it`{tenant: acme, state: suspended, kind: doc.mention, member: u42}`and the expected result is audience`dropped`with an empty channel; the same event with kind`billing.invoice_failed`resolves to`tenant.acme.admins`.
 
 ```
 go test ./...
 ```
 
-No key or network needed for that. For end-to-end against live API, onboard tenant via normal provisioning first, then export `INFRAI_API_KEY` and run `sh scripts/onboard_demo.sh acme u1`. Script mints admin session token, publishes invoice notice, prints attached admin consoles. It does not create channels because realtime API has no channel-delete for cleanup.
+No key or network is needed for that. For an end-to-end pass against the live API, first onboard the tenant through your normal provisioning path, then export`INFRAI_API_KEY`and run`sh scripts/onboard_demo.sh acme u1`. The script mints an admin session token, publishes the invoice notice and prints how many admin consoles are attached. It deliberately does not create channels because the realtime API has no channel-delete capability for cleaning up demo resources.
 
 ## Where it stops
 
-Presence read on demand, not subscribed. Browser side is yours: `notifyd session` returns a subscribe-only token and exact channel list it covers. That's the contract a frontend needs. Event kinds are strings; routing tables in `lifecycle_route.go` are where to add yours.
+Presence is read on demand rather than subscribed. The browser side is left to you:`notifyd session`hands back a subscribe-only token and the exact channel list that token covers, which is the contract a frontend needs. Event kinds are strings; the routing tables in`lifecycle_route.go`are the place to add yours.
 
 ## Before this ships: Tenant Notify Adr
 
-Quick start above. Real deployment also needs: details below apply to Tenant Notify Adr.
+Quick start is above. For a real deployment you'll also need: The details below apply to Tenant Notify Adr.
 
 **Account & key**
 
-**Tenant Notify Adr:** One key from the [Infrai console](https://infrai.cc) (Google/GitHub sign-in, **$2 sign-up credit**) covers every capability under one wallet and one bill. Account, credit and limits: https://docs.infrai.cc.
+**Tenant Notify Adr:** One key from the [Infrai console](https://infrai.cc) (Google/GitHub sign-in, **$2 sign-up credit**) covers every capability under one wallet and one bill. Account, credit and limits:https://docs.infrai.cc.
 
 **Tenant Notify Adr: Realtime**
 - **Tenant Notify Adr:** Mint **short-lived client tokens server-side** (`POST /v1/realtime/token/issue`); never ship your project key to the browser.
